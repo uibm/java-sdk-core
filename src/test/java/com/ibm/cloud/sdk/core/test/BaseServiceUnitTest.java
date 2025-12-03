@@ -14,6 +14,7 @@
 package com.ibm.cloud.sdk.core.test;
 
 import com.google.gson.Gson;
+import com.ibm.cloud.sdk.core.har.HAREncoder;
 import com.ibm.cloud.sdk.core.http.HttpHeaders;
 import com.ibm.cloud.sdk.core.http.HttpMediaType;
 import com.ibm.cloud.sdk.core.util.GsonSingleton;
@@ -26,6 +27,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 
 import org.apache.commons.lang3.StringUtils;
 import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -46,22 +48,29 @@ public class BaseServiceUnitTest {
 
   /**
    * Setups and starts the mock server.
+   * Also resets HAR encoder to ensure it's disabled for tests.
    *
    * @throws Exception the exception
    */
+  @BeforeMethod
   public void setUp() throws Exception {
+    // Reset HAR encoder before each test to ensure it's disabled
+    HAREncoder.resetForTesting();
     server = new MockWebServer();
     server.start();
   }
 
   /**
    * Tear down.
+   * Also resets HAR encoder after each test.
    *
    * @throws IOException Signals that an I/O exception has occurred.
    */
   @AfterMethod
   public void tearDown() throws IOException {
     server.shutdown();
+    // Reset HAR encoder after each test to ensure clean state
+    HAREncoder.resetForTesting();
   }
 
   /**

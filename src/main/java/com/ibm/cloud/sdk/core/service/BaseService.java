@@ -14,6 +14,7 @@
 package com.ibm.cloud.sdk.core.service;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -33,6 +34,8 @@ import com.ibm.cloud.sdk.core.http.ResponseConverter;
 import com.ibm.cloud.sdk.core.http.ServiceCall;
 import com.ibm.cloud.sdk.core.http.ServiceCallback;
 import com.ibm.cloud.sdk.core.security.Authenticator;
+import com.ibm.cloud.sdk.core.har.HAREncoder;
+import com.ibm.cloud.sdk.core.har.HAREncoder.HarEntryInput;
 import com.ibm.cloud.sdk.core.service.exception.BadRequestException;
 import com.ibm.cloud.sdk.core.service.exception.ConflictException;
 import com.ibm.cloud.sdk.core.service.exception.ForbiddenException;
@@ -53,10 +56,14 @@ import io.reactivex.Single;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.Headers;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Request.Builder;
+import okhttp3.RequestBody;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
+import okio.Buffer;
 
 import javax.net.ssl.SSLHandshakeException;
 
@@ -597,11 +604,14 @@ public abstract class BaseService {
 
     @Override
     public com.ibm.cloud.sdk.core.http.Response<T> execute() {
+      Instant startTime = Instant.now();
       try {
         Response response = call.execute();
+        recordHar(call.request(), response, null, startTime, Instant.now());
         T responseModel = processServiceCall(converter, response);
         return new com.ibm.cloud.sdk.core.http.Response<>(responseModel, response);
       } catch (IOException e) {
+        recordHar(call.request(), null, e.getMessage(), startTime, Instant.now());
         if (e instanceof SSLHandshakeException) {
           LOG.log(Level.WARNING, ERRORMSG_SSL);
         }
@@ -611,9 +621,11 @@ public abstract class BaseService {
 
     @Override
     public void enqueue(final ServiceCallback<T> callback) {
+      final Instant startTime = Instant.now();
       call.enqueue(new Callback() {
         @Override
         public void onFailure(Call call, IOException e) {
+          recordHar(call.request(), null, e.getMessage(), startTime, Instant.now());
           if (e instanceof SSLHandshakeException) {
             LOG.log(Level.WARNING, ERRORMSG_SSL);
           }
@@ -623,6 +635,7 @@ public abstract class BaseService {
         @Override
         public void onResponse(Call call, Response response) {
           try {
+            recordHar(call.request(), response, null, startTime, Instant.now());
             T responseModel = processServiceCall(converter, response);
             callback.onResponse(new com.ibm.cloud.sdk.core.http.Response<>(responseModel, response));
           } catch (Exception e) {
@@ -637,11 +650,14 @@ public abstract class BaseService {
       return Single.fromCallable(new Callable<com.ibm.cloud.sdk.core.http.Response<T>>() {
         @Override
         public com.ibm.cloud.sdk.core.http.Response<T> call() {
+          Instant startTime = Instant.now();
           try {
             Response response = call.execute();
+            recordHar(call.request(), response, null, startTime, Instant.now());
             T responseModel = processServiceCall(converter, response);
             return new com.ibm.cloud.sdk.core.http.Response<>(responseModel, response);
           } catch (IOException e) {
+            recordHar(call.request(), null, e.getMessage(), startTime, Instant.now());
             if (e instanceof SSLHandshakeException) {
               LOG.log(Level.WARNING, ERRORMSG_SSL);
             }
@@ -664,6 +680,75 @@ public abstract class BaseService {
         final Request r = call.request();
         LOG.log(Level.WARNING, "Request {0} {1} has not been sent.  Did you forget to call execute()?",
             new Object[] { r.method(), r.url().toString() });
+      }
+    }
+
+    private void recordHar(Request request, Response response, String callError, Instant start, Instant end) {
+      HAREncoder encoder = HAREncoder.getInstance();
+      if (!encoder.isEnabled()) {
+        return;
+      }
+
+      try {
+        HarEntryInput input = new HarEntryInput();
+        if (request != null) {
+          input.setRequestUrl(request.url().toString());
+          input.setMethod(request.method());
+          input.setRequestHeaders(request.headers().toMultimap());
+          HttpUrl url = request.url();
+          Map<String, java.util.List<String>> queryMap = new HashMap<>();
+          for (String name : url.queryParameterNames()) {
+            queryMap.put(name, url.queryParameterValues(name));
+          }
+          input.setQueryParams(queryMap);
+
+          RequestBody reqBody = request.body();
+          if (reqBody != null) {
+            try {
+              Buffer buffer = new Buffer();
+              reqBody.writeTo(buffer);
+              input.setRequestBody(buffer.readByteArray());
+            } catch (Throwable t) {
+              // ignore
+            }
+            if (reqBody.contentType() != null) {
+              input.setRequestContentType(reqBody.contentType().toString());
+            }
+          }
+        }
+
+        if (response != null) {
+          input.setStatusCode(response.code());
+          input.setStatusText(response.message());
+          input.setResponseHeaders(response.headers().toMultimap());
+          String protocol = response.protocol().toString().replace('_', '/');
+          input.setRequestProtocol(protocol);
+          input.setResponseProtocol(protocol);
+
+          ResponseBody respBody = response.body();
+          if (respBody != null) {
+            long maxBytes = respBody.contentLength();
+            if (maxBytes < 0 || maxBytes > 1024 * 1024) {
+              maxBytes = 1024 * 1024;
+            }
+            try {
+              ResponseBody peeked = response.peekBody(maxBytes);
+              input.setResponseBody(peeked.bytes());
+            } catch (Throwable t) {
+              // ignore
+            }
+            if (respBody.contentType() != null) {
+              input.setResponseContentType(respBody.contentType().toString());
+            }
+          }
+        }
+
+        input.setCallError(callError);
+        input.setStartTime(start != null ? start : Instant.now());
+        input.setEndTime(end != null ? end : Instant.now());
+        encoder.append(input);
+      } catch (Throwable t) {
+        LOG.log(Level.FINE, "HAR recording failed", t);
       }
     }
   }
